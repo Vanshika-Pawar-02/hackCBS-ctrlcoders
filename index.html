@@ -1,0 +1,718 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CashFlow Copilot</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.4/babel.min.js"></script>
+<script>tailwind.config = { darkMode: 'class' };</script>
+<style>body{margin:0;font-family:Inter,system-ui,sans-serif}.nsb::-webkit-scrollbar{display:none}</style>
+</head>
+<body class="bg-[#090e0c]">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+ 
+const PRESETS = {
+  agency: { name: 'Tech Agency (Payroll Crunch)', cash: 24500,
+    inv: [
+      { id: 'i1', client: 'Acme Global Corp', amount: 32000, due: 8, conf: 'medium', paid: false },
+      { id: 'i2', client: 'Starlight Retailers', amount: 14500, due: 18, conf: 'high', paid: false },
+      { id: 'i3', client: 'Zenith Logistics', amount: 9800, due: 42, conf: 'high', paid: false },
+      { id: 'i4', client: 'HyperFlow Media', amount: 21000, due: 65, conf: 'medium', paid: false } ],
+    exp: [
+      { id: 'e1', title: 'Engineering Payroll', amount: 28000, days: [5, 35, 65], cat: 'Payroll', essential: true },
+      { id: 'e2', title: 'Quarterly GST Filing', amount: 12400, days: [20], cat: 'Tax', essential: true },
+      { id: 'e3', title: 'Office Lease', amount: 6500, days: [1, 31, 61], cat: 'Rent', essential: true },
+      { id: 'e4', title: 'AWS Cloud', amount: 4200, days: [12, 42, 72], cat: 'Vendor', essential: true },
+      { id: 'e5', title: 'Marketing Retainer', amount: 5000, days: [15, 45, 75], cat: 'Discretionary', essential: false },
+      { id: 'e6', title: 'Workstation CapEx', amount: 3800, days: [22], cat: 'CapEx', essential: false } ] },
+  saas: { name: 'SaaS Studio (Healthy Cushion)', cash: 68000,
+    inv: [
+      { id: 's1', client: 'Enterprise Cloud Systems', amount: 45000, due: 10, conf: 'high', paid: false },
+      { id: 's2', client: 'Nordic Financial Tech', amount: 32000, due: 28, conf: 'high', paid: false },
+      { id: 's3', client: 'AeroDynamics Lab', amount: 28000, due: 55, conf: 'high', paid: false } ],
+    exp: [
+      { id: 'x1', title: 'Product Salaries', amount: 26000, days: [1, 31, 61], cat: 'Payroll', essential: true },
+      { id: 'x2', title: 'Kubernetes & GPU Hosting', amount: 6500, days: [15, 45, 75], cat: 'Vendor', essential: true },
+      { id: 'x3', title: 'Coworking Lease', amount: 4000, days: [5, 35, 65], cat: 'Rent', essential: true },
+      { id: 'x4', title: 'Ad Retargeting', amount: 4500, days: [18, 48], cat: 'Discretionary', essential: false } ] }
+};
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const num = (v) => { const n = parseFloat(String(v ?? '').replace(/[^0-9.-]/g, '')); return isNaN(n) ? 0 : n; };
+ 
+const EMPTY_AUTH = {
+  companyName: '', email: '', password: '', confirmPassword: '', businessId: '',
+  businessType: 'Retail / E-commerce', monthlyRevenue: 'Below ₹1 lakh',
+  currentCash: '', monthlyExpenditure: '', customerReceivables: '', vendorPayables: '',
+  financialChallenge: 'Delayed customer payments'
+};
+ 
+function forecast(cash, inv, exp, H, s) {
+  let b = cash, w = cash, g = cash, m = cash;
+  let min = cash, crunch = null, simMin = cash, simCrunch = null;
+  const rows = [];
+  for (let d = 0; d <= H; d++) {
+    let inB = 0, inW = 0, inG = 0, out = 0, inS = 0, outS = 0;
+    inv.forEach((i) => {
+      if (i.paid) return;
+      if (i.due === d) {
+        inB += i.amount; inG += i.amount * 1.05;
+        inW += i.amount * (i.conf === 'high' ? 0.95 : i.conf === 'medium' ? 0.65 : 0.35);
+      }
+      const sd = i.due + (i.id === s.clientId ? s.clientDelay : 0);
+      if (sd === d) inS += i.amount * (1 - s.shock / 100);
+    });
+    exp.forEach((e) => {
+      if (e.days.includes(d)) out += e.amount;
+      if (s.pauseOpt && !e.essential) return;
+      const sh = e.cat === 'Vendor' ? s.vendorDelay : 0;
+      if (e.days.map((x) => x + sh).includes(d)) outS += e.amount;
+    });
+    if (s.hire > 0 && [15, 45, 75].includes(d)) outS += s.hire * s.heads;
+    if (d > 0) { b += inB - out; w += inW - out * 1.05; g += inG - out; m += inS - outS; }
+    if (b < min) min = b;
+    if (b < 0 && crunch === null) crunch = d;
+    if (m < simMin) simMin = m;
+    if (m < 0 && simCrunch === null) simCrunch = d;
+    rows.push({ d, base: Math.round(b), worst: Math.round(w), best: Math.round(g), sim: Math.round(m), inflow: inB, outflow: out });
+  }
+  return { rows, min, crunch, simMin, simCrunch };
+}
+ 
+function Chart({ rows, H, showSim, fmt, dark, crunch }) {
+  const [hv, setHv] = useState(null);
+  const W = 860, Ht = 300, p = { t: 20, r: 30, b: 36, l: 70 };
+  const cw = W - p.l - p.r, ch = Ht - p.t - p.b;
+  const vals = [0]; rows.forEach((r) => vals.push(r.base, r.worst, r.best, r.sim));
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const yMin = Math.min(-5000, Math.floor((lo < 0 ? lo * 1.2 : -5000) / 5000) * 5000);
+  const yMax = Math.max(10000, Math.ceil((hi * 1.15) / 5000) * 5000);
+  const X = (d) => p.l + (d / H) * cw;
+  const Y = (v) => p.t + ch - ((v - yMin) / (yMax - yMin)) * ch;
+  const path = (k) => rows.map((r, i) => `${i ? 'L' : 'M'}${X(r.d)} ${Y(r[k])}`).join(' ');
+  const onMove = (e) => {
+    const rc = e.currentTarget.getBoundingClientRect();
+    const sx = ((e.clientX - rc.left) / rc.width) * W;
+    if (sx < p.l || sx > W - p.r) return setHv(null);
+    setHv(rows[Math.min(H, Math.max(0, Math.round(((sx - p.l) / cw) * H)))]);
+  };
+  const grid = dark ? '#1e293b' : '#e2e8f0', txt = dark ? '#64748b' : '#94a3b8';
+  return (
+    <div className="relative">
+      <svg viewBox={`0 0 ${W} ${Ht}`} className="w-full h-auto cursor-crosshair select-none" onMouseMove={onMove} onMouseLeave={() => setHv(null)}>
+        {[0, 0.25, 0.5, 0.75, 1].map((q) => { const v = yMin + q * (yMax - yMin); return (
+          <g key={q}><line x1={p.l} x2={W - p.r} y1={Y(v)} y2={Y(v)} stroke={grid} strokeDasharray="3 3" />
+            <text x={p.l - 8} y={Y(v) + 3} fontSize="10" textAnchor="end" fill={txt}>{fmt(v)}</text></g>); })}
+        <line x1={p.l} x2={W - p.r} y1={Y(0)} y2={Y(0)} stroke="#ef4444" strokeDasharray="4 4" />
+        {[10, 20, 30, 45, 60, 75, 90].filter((d) => d <= H).map((d) => (
+          <text key={d} x={X(d)} y={Ht - 14} fontSize="10" textAnchor="middle" fill={txt}>Day {d}</text>))}
+        <path d={`${path('base')} L${X(H)} ${Y(yMin)} L${X(0)} ${Y(yMin)} Z`} fill="#10b981" opacity="0.15" />
+        <path d={path('worst')} fill="none" stroke="#f59e0b" strokeDasharray="3 3" />
+        <path d={path('best')} fill="none" stroke="#6ee7b7" />
+        <path d={path('base')} fill="none" stroke="#10b981" strokeWidth="2.5" />
+        {showSim && <path d={path('sim')} fill="none" stroke="#fbbf24" strokeWidth="2.5" strokeDasharray="5 3" />}
+        <circle r="4.5" fill="#10b981" stroke="#fff" strokeWidth="1.5"><animateMotion dur="7s" repeatCount="indefinite" path={path('base')} /></circle>
+        {crunch != null && crunch <= H && <g>
+          <circle cx={X(crunch)} cy={Y(0)} r="6" fill="#ef4444" opacity="0.5"><animate attributeName="r" values="6;22;6" dur="1.8s" repeatCount="indefinite" /><animate attributeName="opacity" values="0.55;0;0.55" dur="1.8s" repeatCount="indefinite" /></circle>
+          <circle cx={X(crunch)} cy={Y(0)} r="6" fill="#ef4444" stroke="#fff" strokeWidth="2" />
+          <text x={X(crunch)} y={Y(0) - 16} fontSize="11" fontWeight="700" textAnchor="middle" fill="#ef4444">Deficit · Day {crunch}</text></g>}
+        {hv && <g><line x1={X(hv.d)} x2={X(hv.d)} y1={p.t} y2={Ht - p.b} stroke="#fbbf24" strokeDasharray="2 2" />
+          <circle cx={X(hv.d)} cy={Y(hv.base)} r="4" fill="#10b981" stroke="#fff" /></g>}
+      </svg>
+      {hv && (
+        <div className={`absolute top-2 pointer-events-none p-3 rounded-xl border text-xs shadow-xl ${dark ? 'bg-slate-950/95 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'}`}
+          style={{ left: `${Math.min(Math.max(2, (X(hv.d) / W) * 100), 70)}%` }}>
+          <div className="font-semibold text-amber-500">Day {hv.d} · <span className="text-emerald-400 font-mono">{fmt(hv.base)}</span></div>
+          <div className="text-slate-400">Worst: <span className="font-mono text-amber-500">{fmt(hv.worst)}</span></div>
+          {showSim && <div className="text-slate-400">Simulated: <span className="font-mono text-amber-400">{fmt(hv.sim)}</span></div>}
+          <div className="text-slate-400">In: <span className="text-emerald-400 font-mono">+{fmt(hv.inflow)}</span> Out: <span className="text-rose-400 font-mono">-{fmt(hv.outflow)}</span></div>
+        </div>)}
+    </div>
+  );
+}
+ 
+function App() {
+  const [dark, setDark] = useState(true);
+  const [region, setRegion] = useState('IN');
+  const [rate, setRate] = useState(95.75);
+  const [H, setH] = useState(60);
+  const [tab, setTab] = useState('dashboard');
+  const [preset, setPreset] = useState('agency');
+  const [cash, setCash] = useState(PRESETS.agency.cash);
+  const [inv, setInv] = useState(clone(PRESETS.agency.inv));
+  const [exp, setExp] = useState(clone(PRESETS.agency.exp));
+  const [hist, setHist] = useState([]);
+  const [applied, setApplied] = useState({});
+  const [toast, setToast] = useState(null);
+  const [sim, setSim] = useState({ clientId: 'i1', clientDelay: 0, hire: 0, heads: 1, vendorDelay: 0, shock: 0, pauseOpt: false });
+  const [row, setRow] = useState(null);
+  const [q, setQ] = useState(''); const [ai, setAi] = useState(null); const [listening, setListening] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false); const [scanTab, setScanTab] = useState('upload'); const [cam, setCam] = useState(false);
+  const [shot, setShot] = useState(null); const [bill, setBill] = useState(null);
+  const [csvOpen, setCsvOpen] = useState(false); const [csvPrev, setCsvPrev] = useState(null); const [csvMode, setCsvMode] = useState('merge');
+  const [vid, setVid] = useState(''); const [strat, setStrat] = useState('split'); const [tone, setTone] = useState('collaborative');
+  const [camErr, setCamErr] = useState('');
+  const videoRef = React.useRef(null), streamRef = React.useRef(null), recRef = React.useRef(null);
+ 
+  const [users, setUsers] = useState([{ id: 'u1', companyName: 'Apex Innovations Pvt Ltd', email: 'founder@apex.com', password: 'password123', role: 'Founder & CEO' }]);
+  const [user, setUser] = useState({ id: 'u1', companyName: 'Apex Innovations Pvt Ltd', email: 'founder@apex.com', role: 'Founder & CEO' });
+  const [spaces, setSpaces] = useState({});
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState('login');
+  const [auth, setAuth] = useState(EMPTY_AUTH);
+  const [authErr, setAuthErr] = useState('');
+  const [menu, setMenu] = useState(false);
+ 
+  const fmt = (v) => new Intl.NumberFormat(region === 'IN' ? 'en-IN' : 'en-US', { style: 'currency', currency: region === 'IN' ? 'INR' : 'USD', maximumFractionDigits: 0 }).format(v || 0);
+  const sym = region === 'IN' ? '₹' : '$';
+  const say = (t, d) => { setToast({ t, d }); setTimeout(() => setToast(null), 3500); };
+  const snap = (label) => setHist((h) => [{ label, cash, inv: clone(inv), exp: clone(exp), applied: { ...applied } }, ...h.slice(0, 10)]);
+  const undo = () => { const l = hist[0]; if (!l) return; setCash(l.cash); setInv(l.inv); setExp(l.exp); setApplied(l.applied); setHist((h) => h.slice(1)); say('Reverted', l.label); };
+  const resetSim = () => setSim((s) => ({ ...s, clientDelay: 0, hire: 0, heads: 1, vendorDelay: 0, shock: 0, pauseOpt: false }));
+  const loadWs = (c, i, e, key) => { setCash(c); setInv(i); setExp(e); setPreset(key); setApplied({}); setHist([]); resetSim(); setTab('dashboard'); };
+ 
+  const loadPreset = (k) => {
+    if (k === 'empty') return loadWs(0, [], [], 'empty');
+    const p = PRESETS[k]; loadWs(p.cash, clone(p.inv), clone(p.exp), k);
+    setRegion('IN'); say('Preset loaded', p.name);
+  };
+  const switchRegion = (r) => {
+    if (r === region) return;
+    snap('Currency change');
+    const m = r === 'IN' ? rate : 1 / rate;
+    setCash((c) => Math.round(c * m));
+    setInv((a) => a.map((i) => ({ ...i, amount: Math.round(i.amount * m) })));
+    setExp((a) => a.map((e) => ({ ...e, amount: Math.round(e.amount * m) })));
+    setSim((s) => ({ ...s, hire: Math.round(s.hire * m) }));
+    setRegion(r); say('Currency converted', `1 USD = ₹${rate.toFixed(2)}`);
+  };
+ 
+  const dl = (n, b) => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = n; a.click(); };
+  const M = (x) => { const m = String(x).match(/(\d+(?:\.\d+)?)\s*(k|l|lakh|lac|cr|crore)?/i); if (!m) return 0; const u = (m[2] || '').toLowerCase(); return +m[1] * (u === 'k' ? 1e3 : u.startsWith('c') ? 1e7 : u ? 1e5 : 1); };
+  const runAI = (text) => {
+    const t = text.toLowerCase(), N = '(\\d+(?:\\.\\d+)?\\s*(?:k|l|lakh|lac|cr|crore)?)';
+    const g = (re) => { const m = t.match(new RegExp(re)); return m ? M(m[1]) : 0; };
+    const have = g(N + '\\s*(?:rs\\.?|inr|₹)?\\s*(?:in|in my)?\\s*(?:my\\s*)?(?:account|bank|cash|balance)') || g('(?:have|balance|cash)[^0-9]{0,15}' + N) || cash;
+    const pay = g('(?:payable|bill|invoice|due|owe|pay)[^0-9]{0,20}' + N) || g(N + '\\s*(?:rs\\.?|inr|₹)?\\s*(?:payable|bill|due|invoice)');
+    const dm = t.match(/(\d+)\s*(day|week)/);
+    if (/late|delay/.test(t)) setSim((x) => ({ ...x, clientDelay: dm ? +dm[1] * (dm[2] === 'week' ? 7 : 1) : 14 }));
+    if (/hire|recruit/.test(t)) setSim((x) => ({ ...x, hire: region === 'IN' ? 35000 : 500 }));
+    if (/freeze|pause|cut cost/.test(t)) setSim((x) => ({ ...x, pauseOpt: true }));
+    const burn = exp.filter((e) => e.essential && e.days.some((d) => d <= 30)).reduce((a, e) => a + e.amount, 0);
+    const recv = inv.filter((i) => !i.paid).reduce((a, i) => a + i.amount, 0);
+    const disc = exp.filter((e) => !e.essential).reduce((a, e) => a + e.amount, 0);
+    const gap = pay - have, left = have - pay;
+    let sev = 'Low', problem, risks, actions;
+    if (pay > 0 && gap > 0) { sev = 'High'; problem = `Immediate liquidity deficit: you hold ${fmt(have)} against a ${fmt(pay)} payable, a ${fmt(gap)} shortfall (${Math.round(have / pay * 100)}% coverage). Paying in full would overdraw the account${F.crunch ? ` and worsen the Day ${F.crunch} crunch already in your forecast` : ''}.`;
+      risks = ['Overdraft or bounced payment, with bank charges and a credit-score hit', 'Vendor trust damage: supply holds, loss of credit terms, or legal notice', 'Late-payment penalties and interest compounding the debt', 'Knock-on shortage for payroll, rent and tax due in the same window', `Operating on ~${burn ? (have / burn).toFixed(1) : 'few'} month(s) of essential cover, with no buffer for surprises`];
+      actions = [`Release a good-faith partial payment of ~${fmt(Math.round(have * 0.5))} now and keep the rest for essentials`, `Negotiate 15–30 days on the remaining ${fmt(pay - Math.round(have * 0.5))}, or split it in 3 tranches (see the Negotiate tab)`, recv > 0 ? `Chase ${fmt(recv)} of pending receivables; a 2% early-pay discount costs ~${fmt(recv * 0.02)} but brings cash forward` : 'Invoice any unbilled work today and ask for advances', disc > 0 ? `Pause ${fmt(disc)} of discretionary spend` : 'Freeze all non-essential spend', `Cover only the gap (${fmt(gap)}) from an overdraft or invoice factoring (~2.5% fee ≈ ${fmt(gap * 0.025)})`]; }
+    else if (pay > 0) { sev = left < burn ? 'Medium' : 'Low'; problem = `You can pay the ${fmt(pay)} payable from ${fmt(have)}, leaving ${fmt(left)}. ${left < burn ? `That is less than one month of essential outflow (~${fmt(burn)}), so the next payroll/tax date is exposed.` : 'The remaining buffer covers at least a month of essentials.'}`;
+      risks = ['Thin buffer if a client pays late', 'A second large bill in the same month could tip you negative', 'Paying early forfeits free vendor credit days'];
+      actions = [left < burn ? 'Ask the vendor for a 2-tranche schedule to keep a buffer' : 'Pay on the due date, not earlier', 'Confirm receivable dates before committing cash', 'Set an alert at one month of essentials'];
+    } else { sev = F.crunch ? 'High' : 'Low'; problem = F.crunch ? `No payable was detected in your question. Your workspace still dips to ${fmt(F.min)} around Day ${F.crunch}.` : `No payable detected. Your workspace stays positive for ${H} days (lowest ${fmt(F.min)}).`;
+      risks = ['Client payment slippage', 'Fixed costs landing before receivables', 'Revenue concentration in a few customers']; actions = ['Open Act & Fix to apply one-click remedies', 'Use the Simulate tab to stress-test delays and hires', 'Try: "what if I have 20k in account and a payable of 55k?"']; }
+    const prevention = [`Hold a buffer of at least 1× monthly essential outflow (~${fmt(burn)})`, 'Negotiate vendor terms to Net-45/60 and align payables after customer receipts', 'Invoice on milestones and offer early-pay discounts', 'Review a rolling 13-week forecast every Monday', 'Keep an overdraft or factoring line approved before you need it'];
+    return { sev, problem, risks, actions, prevention, have, pay };
+  };
+  const mic = async () => {
+    const S = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!S) return say('Voice not supported', 'Use Chrome, Edge or Safari');
+    if (listening) { recRef.current?.stop(); return setListening(false); }
+    try { const st = await navigator.mediaDevices.getUserMedia({ audio: true }); st.getTracks().forEach((t) => t.stop()); }
+    catch (e) { return say('Microphone blocked', 'Allow the mic in the address bar, and open the page via https or http://localhost'); }
+    const r = new S(); r.lang = region === 'IN' ? 'en-IN' : 'en-US'; r.interimResults = true; r.continuous = false;
+    r.onresult = (e) => { const t = Array.from(e.results).map((x) => x[0].transcript).join(''); setQ(t); if (e.results[e.results.length - 1].isFinal && t.trim()) setAi(runAI(t)); };
+    r.onerror = (e) => { setListening(false); say('Voice error', e.error === 'not-allowed' || e.error === 'service-not-allowed' ? 'Mic denied. Open via http://localhost or https, not file://' : e.error === 'network' ? 'Speech service needs internet' : e.error === 'no-speech' ? 'No speech heard, try again' : e.error); };
+    r.onend = () => setListening(false);
+    recRef.current = r; r.start(); setListening(true); say('Listening…', 'Speak your scenario now');
+  };
+  const loadScenario = () => { snap('Load scenario'); setCash(ai.have); if (ai.pay > 0) setExp((a) => [...a, { id: 'sc' + Date.now(), title: 'Scenario payable', amount: ai.pay, days: [10], cat: 'Vendor', essential: true }]); setTab('dashboard'); say('Scenario loaded', 'Cash and a Day-10 payable were added to the chart'); };
+ 
+  const DEMO = ['AWS_Invoice_4200_day12.png', 'Acme_PO_32000_day8.png', 'GST_Notice_12400_day20.png', 'Office_Lease_6500_day5.png'];
+  const readName = (n) => { const L = n.toLowerCase(), a = /day\d+/.test(L) ? (L.match(/(\d{3,7})/) || [])[1] : '', d = (L.match(/day(\d+)/) || [])[1]; const inc = /po|client|sale|receivable/.test(L);
+    return { title: n.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' ').replace(/\d+/g, '').replace(/\s+/g, ' ').replace(/day$/i, '').trim() || 'Scanned bill', amount: a || '', day: d || 15, type: inc ? 'receivable' : 'payable', cat: /gst|tax/.test(L) ? 'Tax' : /lease|rent/.test(L) ? 'Rent' : 'Vendor' }; };
+  const drawBill = (n) => { const b = readName(n), c = document.createElement('canvas'); c.width = 640; c.height = 360; const x = c.getContext('2d');
+    x.fillStyle = '#fff'; x.fillRect(0, 0, 640, 360); x.fillStyle = '#111'; x.font = 'bold 28px sans-serif'; x.fillText('INVOICE · ' + b.title, 30, 60); x.font = '20px sans-serif';
+    x.fillText('Amount: ' + b.amount, 30, 130); x.fillText('Due: Day ' + b.day, 30, 170); x.fillText('Type: ' + b.type, 30, 210); x.fillText('Demo document for CashFlow Copilot', 30, 320);
+    c.toBlob((bl) => dl(n, bl)); };
+  const stopCam = () => { streamRef.current?.getTracks().forEach((t) => t.stop()); streamRef.current = null; setCam(false); };
+  const startCam = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return setCamErr('Camera API unavailable. Open via https or http://localhost, or use "Take photo" / Upload.');
+    try { setCamErr(''); let st; try { st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } }); } catch (e) { st = await navigator.mediaDevices.getUserMedia({ video: true }); }
+      streamRef.current = st; setShot(null); setCam(true); }
+    catch (e) { setCamErr(e.name === 'NotAllowedError' ? 'Camera permission denied. Click the camera icon in the address bar and choose Allow.' : e.name === 'NotFoundError' ? 'No camera found on this device.' : 'Could not start camera (' + e.name + '). Use Take photo or Upload.'); }
+  };
+  const snapCam = () => { const v = videoRef.current, c = document.createElement('canvas'); c.width = v.videoWidth || 640; c.height = v.videoHeight || 480; c.getContext('2d').drawImage(v, 0, 0, c.width, c.height); setShot(c.toDataURL('image/jpeg', 0.85)); setBill({ title: 'Camera receipt', amount: '', day: 15, type: 'payable', cat: 'Vendor' }); stopCam(); say('Captured', 'Confirm the amount and due day below'); };
+  const onBillFile = (f) => { if (!f) return; setBill(readName(f.name)); if (f.type.startsWith('image')) { const r = new FileReader(); r.onload = (e) => setShot(e.target.result); r.readAsDataURL(f); } else setShot(null); say('Bill read', 'Check the details and add to forecast'); };
+  const commitBill = () => { const a = num(bill.amount), d = Math.min(90, Math.max(1, parseInt(bill.day, 10) || 15)); if (a <= 0) return say('Amount needed', 'Enter the bill amount'); snap('Scanned bill');
+    if (bill.type === 'receivable') setInv((x) => [...x, { id: 'sc' + Date.now(), client: bill.title, amount: a, due: d, conf: 'high', paid: false }]); else setExp((x) => [...x, { id: 'sc' + Date.now(), title: bill.title, amount: a, days: [d], cat: bill.cat, essential: true }]);
+    say('Forecast recalculated', bill.title); stopCam(); setScanOpen(false); setBill(null); setShot(null); setTab('dashboard'); };
+ 
+  const CSV_T = 'type,title,amount,day,category\nbalance,Opening Cash Balance,35000,1,Cash\nreceivable,Enterprise Contract,24000,10,Revenue\nreceivable,Design Retainer,8500,22,Revenue\npayable,Engineering Payroll,22000,5,Payroll\npayable,GST Filing,7800,20,Tax\npayable,Cloud Compute,4500,15,Vendor\npayable,Marketing Retainer,3000,18,Discretionary';
+  const parseCSV = (txt) => { const L = txt.trim().split(/\r?\n/), Hd = L[0].toLowerCase().split(',').map((x) => x.trim()), o = { cash: null, i: [], e: [] };
+    L.slice(1).forEach((l, k) => { const c = l.split(',').map((x) => x.trim().replace(/^"|"$/g, '')), r = {}; Hd.forEach((h, x) => (r[h] = c[x])); const a = Math.abs(num(r.amount)), d = Math.min(90, Math.max(1, parseInt(r.day, 10) || 15)), ty = (r.type || '').toLowerCase();
+      if (ty.startsWith('bal')) o.cash = a; else if (a > 0 && /rec|inc|inv|rev/.test(ty)) o.i.push({ id: 'ci' + k + Date.now(), client: r.title, amount: a, due: d, conf: 'high', paid: false });
+      else if (a > 0) o.e.push({ id: 'ce' + k + Date.now(), title: r.title, amount: a, days: [d], cat: r.category || 'Vendor', essential: !/market|discret|capex/i.test(r.category || '') }); }); return o; };
+  const onCsv = (f) => { if (!f) return; const r = new FileReader(); r.onload = (e) => setCsvPrev(parseCSV(e.target.result)); r.readAsText(f); };
+  const applyCsv = () => { snap('CSV import'); if (csvMode === 'replace') { setCash(csvPrev.cash ?? 0); setInv(csvPrev.i); setExp(csvPrev.e); } else { if (csvPrev.cash !== null) setCash(csvPrev.cash); setInv((a) => [...a, ...csvPrev.i]); setExp((a) => [...a, ...csvPrev.e]); }
+    setPreset('custom'); setCsvPrev(null); setCsvOpen(false); setTab('dashboard'); say('CSV imported', `${csvPrev.i.length} receivables, ${csvPrev.e.length} payables`); };
+ 
+  const vx = exp.find((e) => e.id === vid) || exp[0];
+  const plan = !vx ? [] : strat === 'split' ? [[vx.days[0], Math.round(vx.amount * 0.4), 'Tranche 1 (40%)'], [vx.days[0] + 20, Math.round(vx.amount * 0.3), 'Tranche 2 (30%)'], [vx.days[0] + 45, vx.amount - Math.round(vx.amount * 0.4) - Math.round(vx.amount * 0.3), 'Tranche 3 (30%)']]
+    : strat === 'extend' ? [[vx.days[0] + 30, vx.amount, 'Net-30 deferral']] : strat === 'advance' ? [[vx.days[0], Math.round(vx.amount * 0.25), 'Advance (25%)'], [vx.days[0] + 35, vx.amount - Math.round(vx.amount * 0.25), 'Balloon (75%)']] : [[vx.days[0], Math.round(vx.amount * 0.6), 'Downgraded tier (-40%)']];
+  const saved = vx ? vx.amount - (plan[0]?.[1] || 0) : 0;
+  const co = user?.companyName || 'Finance Team', sched = plan.map(([d, a, l]) => `  • ${l}: ${fmt(a)} on Day ${d}`).join('\n');
+  const email = `Subject: Payment schedule request – ${vx?.title}\n\n${tone === 'firm' ? 'Dear Accounts Team,' : 'Hi team,'}\n\n${tone === 'firm' ? 'To keep our account in good standing, we are restructuring the' : 'Thank you for the great partnership. We would like to propose a revised schedule for the'} ${fmt(vx?.amount)} balance:\n${sched}\n\n${tone === 'firm' ? 'Please confirm by end of week.' : 'Would this work for you?'}\n\n${tone === 'firm' ? 'Sincerely' : 'Warm regards'},\n${co}`;
+  const wa = `Hi! About ${vx?.title} (${fmt(vx?.amount)}): could we do ${plan.map(([d, a, l]) => `${l} ${fmt(a)} on Day ${d}`).join('; ')}? Thanks – ${co}`;
+  const calls = ['Open with the relationship: "We value working with you and want payments to be predictable."', `State the ask: "${plan.length > 1 ? `Can we split ${fmt(vx?.amount)} into ${plan.length} payments?` : 'Can we adjust the terms on this invoice?'}"`, 'Anchor on a large receivable clearing shortly', 'Fallback: offer a higher upfront share (up to 50%) in exchange for the deferral', 'Close: confirm the new dates in writing by email'];
+  const commitDeal = () => { snap('Vendor deal'); setExp((a) => [...a.filter((e) => e.id !== vx.id), ...(vx.days.length > 1 ? [{ ...vx, id: vx.id + 'r' + Date.now(), days: vx.days.slice(1) }] : []), ...plan.map(([d, am, l], i) => ({ ...vx, id: vx.id + 'n' + i + Date.now(), title: `${vx.title} (${l})`, amount: am, days: [d] }))]); say('Deal committed', `Preserved ${fmt(saved)} in the crunch window`); };
+  const cp = (t) => { navigator.clipboard?.writeText(t); say('Copied', 'Script copied to clipboard'); };
+ 
+  React.useEffect(() => { if (cam && videoRef.current && streamRef.current) { videoRef.current.srcObject = streamRef.current; videoRef.current.play().catch(() => {}); } }, [cam, scanTab, shot]);
+  React.useEffect(() => () => { streamRef.current?.getTracks().forEach((t) => t.stop()); }, []);
+  const F = useMemo(() => forecast(cash, inv, exp, H, sim), [cash, inv, exp, H, sim]);
+  const simActive = sim.clientDelay > 0 || sim.hire > 0 || sim.vendorDelay > 0 || sim.shock > 0 || sim.pauseOpt;
+  const inflow = inv.filter((i) => !i.paid && i.due <= H).reduce((a, i) => a + i.amount, 0);
+  const outflow = exp.reduce((a, e) => a + e.amount * e.days.filter((d) => d <= H).length, 0);
+  const biggest = [...inv].filter((i) => !i.paid).sort((a, b) => b.amount - a.amount)[0];
+  const taxExp = exp.find((e) => e.cat === 'Tax') || exp.find((e) => e.cat === 'Vendor');
+  const driver = F.crunch ? exp.flatMap((e) => e.days.filter((d) => d >= F.crunch - 8 && d <= F.crunch + 3).map((d) => ({ e, d }))).sort((a, b) => b.e.amount - a.e.amount)[0] : null;
+ 
+  const act = (key, fn, msg) => { snap(key); fn(); setApplied((a) => ({ ...a, [key]: true })); say('Action applied', msg); };
+ 
+  const saveRow = (ev) => {
+    ev.preventDefault();
+    const amt = num(row.amount), day = Math.min(90, Math.max(1, parseInt(row.day, 10) || 15));
+    if (!row.title || amt <= 0) return;
+    snap('Add ' + row.kind);
+    if (row.kind === 'invoice') setInv((a) => [...a, { id: 'c' + Date.now(), client: row.title, amount: amt, due: day, conf: 'high', paid: false }]);
+    else setExp((a) => [...a, { id: 'c' + Date.now(), title: row.title, amount: amt, days: [day], cat: row.cat, essential: row.cat !== 'Discretionary' && row.cat !== 'CapEx' }]);
+    setRow(null); say('Entry added', row.title);
+  };
+ 
+  const saveSpace = () => user && setSpaces((s) => ({ ...s, [user.id]: { cash, inv: clone(inv), exp: clone(exp) } }));
+ 
+  const submitAuth = (ev) => {
+    ev.preventDefault(); setAuthErr('');
+    const email = auth.email.trim().toLowerCase(), pw = auth.password.trim();
+    if (!email || !pw) return setAuthErr('Email and password are required.');
+    saveSpace();
+    if (authMode === 'signup') {
+      if (!auth.companyName.trim()) return setAuthErr('Company name is required.');
+      if (pw.length < 6) return setAuthErr('Password must be at least 6 characters.');
+      if (auth.password !== auth.confirmPassword) return setAuthErr('Passwords do not match.');
+      if (users.find((u) => u.email === email)) return setAuthErr('An account with this email already exists.');
+      const nu = { id: 'u' + Date.now(), companyName: auth.companyName.trim(), email, password: pw, role: 'Founder & Administrator',
+        businessType: auth.businessType, monthlyRevenue: auth.monthlyRevenue, financialChallenge: auth.financialChallenge, businessId: auth.businessId };
+      const c = num(auth.currentCash), recv = num(auth.customerReceivables), pay = num(auth.vendorPayables), burn = num(auth.monthlyExpenditure);
+      const si = recv > 0 ? [{ id: 'si' + Date.now(), client: 'Pending Customer Receivables', amount: recv, due: 20, conf: 'medium', paid: false }] : [];
+      const se = [];
+      if (burn > 0) se.push({ id: 'sb' + Date.now(), title: 'Avg Monthly Operating Expense', amount: burn, days: [5, 35, 65], cat: 'Vendor', essential: true });
+      if (pay > 0) se.push({ id: 'sp' + Date.now(), title: 'Pending Vendor Payables', amount: pay, days: [15], cat: 'Vendor', essential: true });
+      setSpaces((s) => ({ ...s, [nu.id]: { cash: c, inv: si, exp: se } }));
+      setUsers((u) => [...u, nu]); setUser(nu);
+      loadWs(c, si, se, 'custom'); setSim((s) => ({ ...s, clientId: si[0]?.id || '' }));
+      say('Account created', `Workspace ready for ${nu.companyName}`);
+    } else {
+      const m = users.find((u) => u.email === email && u.password === pw);
+      if (!m) return setAuthErr('Invalid email or password.');
+      setUser(m);
+      const w = spaces[m.id] || { cash: PRESETS.agency.cash, inv: clone(PRESETS.agency.inv), exp: clone(PRESETS.agency.exp) };
+      loadWs(w.cash, clone(w.inv), clone(w.exp), m.id === 'u1' ? 'agency' : 'custom');
+      say('Logged in', m.companyName);
+    }
+    setAuthOpen(false); setAuth(EMPTY_AUTH);
+  };
+  const logout = () => { saveSpace(); setUser(null); setMenu(false); loadWs(0, [], [], 'empty'); say('Logged out', 'Workspace cleared'); };
+ 
+  const exportCSV = () => {
+    const r = [['Type', 'Title', 'Amount', 'Day', 'Category']];
+    r.push(['balance', 'Opening Cash Balance', cash, 1, 'Cash']);
+    inv.forEach((i) => r.push(['receivable', i.client, i.amount, i.due, i.conf]));
+    exp.forEach((e) => r.push(['payable', e.title, e.amount, e.days.join('|'), e.cat]));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([r.map((x) => x.map((c) => `"${c}"`).join(',')).join('\n')], { type: 'text/csv' }));
+    a.download = 'cashflow_ledger.csv'; a.click();
+  };
+ 
+  const card = `border rounded-xl ${dark ? 'bg-slate-900/60 border-slate-800' : 'bg-white border-slate-200'}`;
+  const inp = `w-full p-2.5 rounded-xl border focus:outline-none focus:border-amber-400 ${dark ? 'bg-slate-950 border-slate-800 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`;
+  const sub = dark ? 'text-slate-400' : 'text-slate-500';
+  const btn = 'px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold active:scale-95 transition';
+  const ghost = `px-3 py-1.5 rounded-xl border text-xs font-semibold ${dark ? 'bg-slate-900 border-slate-800 text-slate-300 hover:border-amber-400/50' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`;
+  const TABS = [['dashboard', '1 · Predict'], ['explain', '2 · Explain'], ['simulator', '3 · Simulate'], ['vendor', '4 · Negotiate'], ['actions', '5 · Act & Fix'], ['ledger', '6 · Ledger']];
+  const field = (label, key, props = {}) => (
+    <div><label className="font-semibold block mb-1">{label}</label>
+      <input className={inp} value={auth[key]} onChange={(e) => setAuth({ ...auth, [key]: e.target.value })} {...props} /></div>);
+  const select = (label, key, opts) => (
+    <div><label className="font-semibold block mb-1">{label}</label>
+      <select className={inp} value={auth[key]} onChange={(e) => setAuth({ ...auth, [key]: e.target.value })}>
+        {opts.map((o) => <option key={o}>{o}</option>)}</select></div>);
+  const slider = (label, val, k, max, step, shown) => (
+    <div className={`p-4 rounded-xl border space-y-2 ${dark ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+      <div className="flex justify-between text-xs"><span className="font-bold">{label}</span><span className="font-mono font-bold text-amber-400">{shown}</span></div>
+      <input type="range" min="0" max={max} step={step} value={val} className="w-full accent-amber-400"
+        onChange={(e) => setSim({ ...sim, [k]: Number(e.target.value) })} />
+    </div>);
+ 
+  return (
+    <div className={`${dark ? 'dark text-slate-200 bg-[#090e0c]' : 'text-slate-800 bg-[#f8faf9]'} min-h-screen pb-16`}>
+      {toast && <div className={`fixed bottom-5 right-5 z-50 p-3.5 rounded-xl border shadow-xl text-xs ${dark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200'}`}>
+        <b>✨ {toast.t}</b><div className="text-slate-400">{toast.d}</div></div>}
+ 
+      <header className={`sticky top-0 z-40 backdrop-blur border-b ${dark ? 'bg-[#090e0c]/90 border-slate-800' : 'bg-white/90 border-slate-200'}`}>
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="leading-none select-none"><div className={`text-lg font-black ${dark ? 'text-white' : 'text-[#082F26]'}`}>CASHFLOW</div>
+            <div className="text-[11px] font-black tracking-[0.2em] text-[#D89F33] mt-1">— COPILOT —</div></div>
+          <div className="flex items-center gap-2">
+            <button className={ghost} onClick={() => setDark(!dark)}>{dark ? '☀️' : '🌙'}</button>
+            {user ? (
+              <div className="relative">
+                <button className={ghost} onClick={() => setMenu(!menu)}><span className="inline-block w-5 h-5 mr-1.5 rounded bg-amber-400 text-slate-950 text-center font-bold">{user.companyName[0].toUpperCase()}</span>
+                  <span className="hidden sm:inline">{user.companyName}</span></button>
+                {menu && <div className={`absolute right-0 mt-2 w-60 p-3 rounded-xl border z-50 text-xs ${dark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-xl'}`}>
+                  <p className="font-bold truncate">{user.companyName}</p><p className="text-slate-400 truncate mb-2">{user.email}</p>
+                  <button className="w-full text-left p-2 rounded-lg text-rose-400 hover:bg-rose-500/10 font-semibold" onClick={logout}>Sign Out</button></div>}
+              </div>
+            ) : (<>
+              <button className={ghost} onClick={() => { setAuthMode('login'); setAuthOpen(true); }}>Log In</button>
+              <button className={btn} onClick={() => { setAuthMode('signup'); setAuthOpen(true); }}>Sign Up</button></>)}
+          </div>
+        </div>
+      </header>
+ 
+      <div className={`border-b ${dark ? 'bg-slate-950/70 border-slate-800' : 'bg-white border-slate-200'}`}>
+        <div className="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2">
+            <select className={ghost} value={preset} onChange={(e) => loadPreset(e.target.value)}>
+              <option value="empty">Fresh Workspace (0)</option>
+              <option value="agency">{PRESETS.agency.name}</option>
+              <option value="saas">{PRESETS.saas.name}</option>
+              {preset === 'custom' && <option value="custom">Custom Workspace</option>}
+            </select>
+            <button className={ghost} onClick={() => preset !== 'custom' && preset !== 'empty' ? loadPreset(preset) : say('Nothing to reset', 'Pick a preset first')}>↻ Reset</button>
+            {hist.length > 0 && <button className={ghost} onClick={undo}>↩ Undo</button>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button className={region === 'IN' ? btn : ghost} onClick={() => switchRegion('IN')}>🇮🇳 ₹ INR</button>
+            <button className={region === 'US' ? btn : ghost} onClick={() => switchRegion('US')}>🇺🇸 $ USD</button>
+            <label className={`${ghost} font-mono`}>1$ = ₹
+              <input type="number" step="0.01" value={rate} onChange={(e) => setRate(num(e.target.value) || 95.75)} className="w-14 ml-1 bg-transparent focus:outline-none" /></label>
+          </div>
+          <div className="flex items-center gap-2">
+            <button className={btn} onClick={() => { setScanOpen(true); setScanTab('upload'); }}>📷 Scan Bill</button>
+            <button className={ghost} onClick={() => setCsvOpen(true)}>⬆ Import CSV</button>
+            <button className={ghost} onClick={() => dl('cashflow_template.csv', new Blob([CSV_T], { type: 'text/csv' }))}>📄 Template</button>
+            <button className={ghost} onClick={exportCSV}>⬇ Export CSV</button>
+            <button className={ghost} onClick={() => window.print()}>🖨 Print</button>
+          </div>
+        </div>
+      </div>
+ 
+      <main className="max-w-7xl mx-auto px-4 pt-5 space-y-5">
+        {F.crunch ? (
+          <div className={`rounded-xl p-4 border flex flex-wrap items-center justify-between gap-3 ${dark ? 'bg-slate-900/80 border-amber-500/30' : 'bg-amber-50 border-amber-200'}`}>
+            <div><div className="text-xs font-semibold text-amber-500 uppercase tracking-wider">⚠ Deficit risk · Day {F.crunch}</div>
+              <h2 className="font-bold">Balance dips to {fmt(F.min)} in {F.crunch} days.</h2>
+              <p className={`text-xs ${sub}`}>Fixed commitments land before receivables. Simulate or apply a fix.</p></div>
+            <div className="flex gap-2"><button className={ghost} onClick={() => setTab('simulator')}>Simulate</button>
+              <button className={btn} onClick={() => setTab('actions')}>Resolve Deficit</button></div>
+          </div>
+        ) : (
+          <div className={`rounded-xl p-4 border flex items-center justify-between ${dark ? 'bg-slate-900/60 border-emerald-950' : 'bg-emerald-50 border-emerald-200'}`}>
+            <div><h4 className="font-semibold text-sm">🛡 Safe operating cushion</h4><p className={`text-xs ${sub}`}>Balance stays positive for {H} days.</p></div>
+            <span className="font-mono text-xs px-2.5 py-1 rounded-md bg-emerald-500/15 text-emerald-400">Min: {fmt(F.min)}</span>
+          </div>)}
+ 
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[['Liquid Cash', fmt(cash), '', 'ledger'], ['Runway', F.crunch ? `${F.crunch} Days` : `> ${H} Days`, F.crunch ? 'text-amber-500' : 'text-emerald-400', 'dashboard'],
+            [`Inflows (${H}d)`, fmt(inflow), 'text-emerald-400', 'ledger'], [`Outflows (${H}d)`, fmt(outflow), 'text-amber-400', 'ledger']].map(([l, v, c, t]) => (
+            <div key={l} onClick={() => setTab(t)} className={`${card} p-4 cursor-pointer hover:border-amber-400/40`}>
+              <div className={`text-[11px] uppercase tracking-wider font-medium ${sub}`}>{l}</div>
+              <div className={`mt-2 text-lg sm:text-xl font-bold font-mono ${c}`}>{v}</div></div>))}
+        </div>
+ 
+        <div className={`${card} p-1.5 flex gap-1 overflow-x-auto nsb`}>
+          {TABS.map(([id, label]) => (
+            <button key={id} onClick={() => setTab(id)} className={`px-4 py-1.5 rounded-lg text-xs whitespace-nowrap ${tab === id ? 'bg-amber-400 text-slate-950 font-bold' : dark ? 'text-slate-400 hover:bg-slate-800/50' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</button>))}
+        </div>
+ 
+        {tab === 'dashboard' && (
+          <div className="space-y-5">
+            <div className={`${card} p-5`}>
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <div><h3 className="font-semibold">30 / 60 / 90-Day Cash Trajectory</h3><p className={`text-xs ${sub}`}>Hover the chart to inspect any day.</p></div>
+                <div className={`flex p-0.5 rounded-xl border ${dark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
+                  {[30, 60, 90].map((d) => <button key={d} onClick={() => setH(d)} className={`px-3 py-1 rounded-lg text-xs font-semibold ${H === d ? 'bg-amber-400 text-slate-950' : sub}`}>{d}d</button>)}</div>
+              </div>
+              <div className={`flex flex-wrap gap-4 text-[11px] pb-3 mb-3 border-b ${dark ? 'border-slate-800' : 'border-slate-100'}`}>
+                <span className="text-emerald-500">━ Expected</span><span className="text-emerald-300">━ Best (+5%)</span><span className="text-amber-400">┅ Worst (delays)</span>
+                {simActive && <span className="text-amber-300 font-semibold">┅ Simulated</span>}<span className="text-rose-500 ml-auto">┅ {sym}0 threshold</span></div>
+              <Chart rows={F.rows} H={H} showSim={simActive} fmt={fmt} dark={dark} crunch={F.crunch} />
+            </div>
+            <div className={`${card} p-5`}>
+              <div className="flex justify-between mb-3"><h3 className="font-semibold text-sm">Liquidity Diagnostics</h3><button className="text-xs font-medium text-amber-500" onClick={() => setTab('explain')}>Deep dive →</button></div>
+              {F.crunch ? (<ul className="space-y-2 text-xs">
+                <li className={`p-3 rounded-lg border ${dark ? 'bg-slate-950/40 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                  1. {driver ? `Major commitment: "${driver.e.title}" (${fmt(driver.e.amount)}) on Day ${driver.d}.` : 'Concentrated fixed liabilities.'}</li>
+                <li className={`p-3 rounded-lg border ${dark ? 'bg-slate-950/40 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                  2. Payroll and tax fall due before receivables clear. {inv.filter((i) => !i.paid && i.conf !== 'high').length} invoice(s) have medium/low clearance certainty.</li></ul>)
+                : <p className={`text-xs ${sub}`}>No deficit detected in this window.</p>}
+            </div>
+          </div>)}
+ 
+        {tab === 'dashboard' && (
+          <div className={`${card} p-5 space-y-4`}>
+            <div><h3 className="font-semibold text-sm">✨ Ask a scenario · AI risk analysis</h3><p className={`text-xs ${sub}`}>Type or speak a what-if. Amounts like 20k, 1.5 lakh and phrases like "pays 20 days late" or "hire 2 engineers" are understood.</p></div>
+            <form onSubmit={(e) => { e.preventDefault(); if (q.trim()) setAi(runAI(q)); }} className="flex flex-col sm:flex-row gap-2">
+              <input className={inp} value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. what if I have 20k in account and a payable of 55k, what should I do?" />
+              <button type="button" title="Speak your scenario" onClick={mic} className={listening ? 'px-4 py-2 rounded-xl bg-rose-500 text-white text-xs font-bold animate-pulse' : ghost}>{listening ? '■ Stop' : '🎙 Speak'}</button>
+              <button className={btn}>⚡ Analyse</button></form>
+            {listening && <div className="text-xs text-rose-400 animate-pulse">● Listening… speak your scenario now</div>}
+            {ai && (<div className="space-y-4 text-xs">
+              <div className={`p-4 rounded-xl border ${ai.sev === 'High' ? 'border-rose-500/40 bg-rose-500/10' : ai.sev === 'Medium' ? 'border-amber-500/40 bg-amber-500/10' : 'border-emerald-500/40 bg-emerald-500/10'}`}>
+                <div className="font-bold mb-1">📊 Problem analysis · <span className={ai.sev === 'High' ? 'text-rose-400' : ai.sev === 'Medium' ? 'text-amber-400' : 'text-emerald-400'}>{ai.sev} severity</span></div><p className="leading-relaxed">{ai.problem}</p></div>
+              <div className="grid md:grid-cols-3 gap-4">
+                {[['⚠ Possible risks', 'text-rose-400', ai.risks], ['🛠 What the owner can do', 'text-amber-400', ai.actions], ['🛡 Prevention', 'text-emerald-400', ai.prevention]].map(([t, c, items]) => (
+                  <div key={t} className={`p-4 rounded-xl border ${dark ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                    <div className={`font-bold mb-2 ${c}`}>{t}</div><ul className="space-y-1.5">{items.map((x, i) => <li key={i} className="flex gap-2"><span className={c}>•</span><span>{x}</span></li>)}</ul></div>))}</div>
+              <div className="flex flex-wrap gap-2"><button className={btn} onClick={loadScenario}>Load these numbers into my chart</button><button className={ghost} onClick={() => setTab('vendor')}>Open Negotiation Hub →</button><button className={ghost} onClick={() => setTab('actions')}>One-click fixes →</button></div>
+            </div>)}
+          </div>)}
+ 
+        {tab === 'simulator' && (
+          <div className={`${card} p-6 space-y-5`}>
+            <div className="flex items-center justify-between"><div><h3 className="font-black text-lg">"What-If?" Sandbox</h3><p className={`text-xs ${sub}`}>Sliders update the dashed line on the chart instantly.</p></div>
+              <button className={ghost} onClick={() => { resetSim(); say('Simulator reset', 'Levers back to baseline'); }}>↺ Reset levers</button></div>
+            {inv.length > 0 && <div className="flex items-center gap-2 text-xs"><span className={sub}>Delay invoice from:</span>
+              <select className={ghost} value={sim.clientId} onChange={(e) => setSim({ ...sim, clientId: e.target.value })}>
+                {inv.map((i) => <option key={i.id} value={i.id}>{i.client}</option>)}</select></div>}
+            <div className="grid md:grid-cols-2 gap-4">
+              {slider('Client delay slippage', sim.clientDelay, 'clientDelay', 45, 1, `+${sim.clientDelay} days`)}
+              {slider(`New hire cost (${sim.heads} FTE)`, sim.hire, 'hire', region === 'IN' ? 150000 : 2000, region === 'IN' ? 5000 : 100, `${fmt(sim.hire * sim.heads)}/mo`)}
+              {slider('Vendor payment grace', sim.vendorDelay, 'vendorDelay', 40, 2, `+${sim.vendorDelay} days`)}
+              {slider('Revenue shock', sim.shock, 'shock', 50, 5, `-${sim.shock}%`)}
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <span className={sub}>Headcount:</span>{[1, 2, 3].map((n) => <button key={n} className={sim.heads === n ? btn : ghost} onClick={() => setSim({ ...sim, heads: n })}>{n}</button>)}
+              <label className="flex items-center gap-1.5 ml-4"><input type="checkbox" checked={sim.pauseOpt} onChange={(e) => setSim({ ...sim, pauseOpt: e.target.checked })} /> Freeze non-essential spend</label>
+            </div>
+            <div className={`p-4 rounded-xl border flex flex-wrap items-center justify-between gap-3 ${F.simMin < 0 ? 'bg-rose-950/30 border-rose-900/60' : 'bg-emerald-950/30 border-emerald-900/60'}`}>
+              <div><div className={`text-[11px] uppercase tracking-wider ${sub}`}>Simulation outcome</div>
+                <span className={`text-xl font-bold font-mono ${F.simMin < 0 ? 'text-rose-500' : 'text-emerald-400'}`}>Lowest: {fmt(F.simMin)}</span>
+                {F.simCrunch && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-rose-500/20 text-rose-400">Crunch Day {F.simCrunch}</span>}</div>
+              <button className={btn} onClick={() => setTab('dashboard')}>View on chart →</button></div>
+          </div>)}
+ 
+        {tab === 'explain' && (() => {
+          const cats = {}; exp.forEach((e) => { cats[e.cat] = (cats[e.cat] || 0) + e.amount * e.days.filter((d) => d <= H).length; });
+          const tot = Object.values(cats).reduce((a, b) => a + b, 0) || 1;
+          const risky = inv.filter((i) => !i.paid && i.conf !== 'high'), pend = inv.filter((i) => !i.paid), pendSum = pend.reduce((a, i) => a + i.amount, 0);
+          const fixed = exp.filter((e) => e.essential).reduce((a, e) => a + e.amount, 0), disc = exp.filter((e) => !e.essential).reduce((a, e) => a + e.amount, 0);
+          const before = exp.flatMap((e) => e.days.filter((d) => !F.crunch || d <= F.crunch + 3).map((d) => ({ e, d }))).sort((a, b) => b.e.amount - a.e.amount).slice(0, 5);
+          const top = [...pend].sort((a, b) => b.amount - a.amount)[0];
+          const pts = [
+            ['1', 'Deficit window', F.crunch ? `Days ${Math.max(1, F.crunch - 5)}–${F.crunch + 5}` : 'None', F.crunch ? `Lowest balance ${fmt(F.min)}` : 'Cash stays positive', 'simulator', 'Simulate fixes'],
+            ['2', 'Main driver', before[0] ? before[0].e.title : '—', before[0] ? `${fmt(before[0].e.amount)} on Day ${before[0].d}` : 'No commitments', 'vendor', 'Negotiate it'],
+            ['3', 'At-risk receivables', `${risky.length} invoice(s)`, `${fmt(risky.reduce((a, i) => a + i.amount, 0))} with medium/low certainty`, 'actions', 'Chase them'],
+            ['4', 'Fixed burden', `${fmt(fixed)} / cycle`, 'Payroll, tax, rent and core vendors', 'vendor', 'Restructure'],
+            ['5', 'Discretionary spend', fmt(disc), disc ? 'Can be paused to relieve cash' : 'Nothing to cut', 'actions', 'Pause spend'],
+            ['6', 'Concentration risk', top && pendSum ? `${Math.round(top.amount / pendSum * 100)}% in one client` : '—', top ? `${top.client}: ${fmt(top.amount)}` : 'No pending invoices', 'ledger', 'View ledger']];
+          return (<div className={`${card} p-6 space-y-5`}>
+            <div><h3 className="font-black text-lg">📊 Root-cause diagnostic centre</h3><p className={`text-xs ${sub}`}>Six pointers that explain why the cash crunch happens.</p></div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">{pts.map(([n, t, v, d, go, cta]) => (
+              <div key={n} className={`p-4 rounded-xl border flex flex-col justify-between ${dark ? 'bg-slate-950/70 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                <div><div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-slate-400"><span className="w-5 h-5 rounded-full bg-amber-400 text-slate-950 font-bold flex items-center justify-center">{n}</span>{t}</div>
+                  <div className="text-lg font-bold font-mono mt-2 text-amber-400">{v}</div><p className={`text-xs mt-1 ${sub}`}>{d}</p></div>
+                <button className="mt-3 text-xs font-bold text-amber-500 text-left" onClick={() => setTab(go)}>{cta} →</button></div>))}</div>
+            <div className="grid md:grid-cols-2 gap-5 text-xs">
+              <div><b>Outflows by category ({H}d)</b><div className="mt-2 space-y-2">{Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([c, v]) => (
+                <div key={c}><div className="flex justify-between"><span>{c}</span><span className="font-mono">{fmt(v)} · {Math.round(v / tot * 100)}%</span></div><div className="h-2 rounded bg-slate-700/40"><div className="h-2 rounded bg-amber-400" style={{ width: `${v / tot * 100}%` }} /></div></div>))}</div></div>
+              <div><b>Largest commitments before the dip</b><ul className="mt-2 space-y-1.5">{before.map((x, i) => <li key={i} className="flex justify-between"><span>Day {x.d} · {x.e.title}</span><span className="font-mono text-amber-400">{fmt(x.e.amount)}</span></li>)}</ul></div></div>
+          </div>); })()}
+ 
+        {tab === 'vendor' && (
+          <div className={`${card} p-6 space-y-5`}>
+            <div><h3 className="font-black text-lg">🤝 Vendor Negotiation Hub</h3><p className={`text-xs ${sub}`}>Pick a payable and a playbook, then copy the email, WhatsApp and call scripts.</p></div>
+            {!vx ? <p className={`text-xs ${sub}`}>Add a payable in the Ledger first.</p> : (<>
+              <div className="flex flex-wrap gap-2 text-xs">{exp.map((e) => <button key={e.id} className={e.id === vx.id ? btn : ghost} onClick={() => setVid(e.id)}>{e.title} · {fmt(e.amount)}</button>)}</div>
+              <div className="flex flex-wrap gap-2 text-xs items-center">{[['split', 'Multi-part tranches'], ['extend', 'Net-30 grace'], ['advance', '25% advance + balloon'], ['down', 'Tier downgrade']].map(([k, l]) => <button key={k} className={strat === k ? btn : ghost} onClick={() => setStrat(k)}>{l}</button>)}
+                <span className="ml-auto flex gap-2 items-center"><span className={sub}>Tone:</span>{['collaborative', 'firm'].map((t) => <button key={t} className={tone === t ? btn : ghost} onClick={() => setTone(t)}>{t}</button>)}</span></div>
+              <div className="grid md:grid-cols-3 gap-4 text-xs">
+                <div className="md:col-span-2 space-y-2">{plan.map(([d, a, l], i) => <div key={i} className={`p-3 rounded-xl border flex justify-between ${dark ? 'bg-slate-950/70 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><span><b>{l}</b> · Day {d}</span><span className="font-mono font-bold text-amber-400">{fmt(a)}</span></div>)}</div>
+                <div className={`p-4 rounded-xl border ${dark ? 'bg-slate-950/70 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><div className={sub}>Cash preserved at first due date</div><div className="text-2xl font-bold font-mono text-emerald-400">+{fmt(saved)}</div>
+                  <div className={`${sub} mt-2`}>Projected low: <span className="font-mono">{fmt(F.min + saved)}</span></div></div></div>
+              <div className="grid lg:grid-cols-3 gap-4 text-xs">
+                <div className={`lg:col-span-2 p-4 rounded-xl border ${dark ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><div className="flex justify-between mb-2"><b className="text-amber-400">✉ Email proposal</b>
+                  <span className="flex gap-2"><button className={ghost} onClick={() => cp(email)}>Copy</button><a className={btn} href={`mailto:?subject=${encodeURIComponent('Payment schedule request – ' + vx.title)}&body=${encodeURIComponent(email)}`}>Open mail</a></span></div><pre className="whitespace-pre-wrap font-mono leading-relaxed">{email}</pre></div>
+                <div className="space-y-4"><div className={`p-4 rounded-xl border ${dark ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><b className="text-emerald-400">💬 WhatsApp</b><p className="my-2">{wa}</p>
+                  <button className={ghost} onClick={() => cp(wa)}>Copy</button> <a className={btn} target="_blank" rel="noreferrer" href={`https://wa.me/?text=${encodeURIComponent(wa)}`}>Open WhatsApp</a></div>
+                  <div className={`p-4 rounded-xl border ${dark ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><b className="text-amber-400">📞 Call talking points</b><ul className="mt-2 space-y-1.5">{calls.map((c, i) => <li key={i}>{i + 1}. {c}</li>)}</ul></div></div></div>
+              <button className={btn} onClick={commitDeal}>⚡ Commit deal to forecast</button></>)}
+          </div>)}
+ 
+        {tab === 'actions' && (
+          <div className="grid md:grid-cols-2 gap-5">
+            {[
+              { k: 'accel', tag: 'Rapid Collection', title: biggest ? `Chase ${biggest.client}` : 'Chase largest invoice', desc: 'Pulls the largest pending receivable 5 days earlier and raises its confidence.', btnLabel: 'Apply to Forecast', ok: !!biggest,
+                fn: () => setInv((a) => a.map((i) => i.id === biggest.id ? { ...i, due: Math.max(1, i.due - 5), conf: 'high' } : i)), msg: 'Invoice advanced by 5 days.' },
+              { k: 'split', tag: 'Liability Deferral', title: taxExp ? `Split "${taxExp.title}" in 2 tranches` : 'Split a tax/vendor bill', desc: 'Halves the bill and pays the second half 25 days later.', btnLabel: 'Apply Split', ok: !!taxExp && taxExp.days.length === 1,
+                fn: () => setExp((a) => a.map((e) => e.id === taxExp.id ? { ...e, amount: Math.round(e.amount / 2), days: [e.days[0], e.days[0] + 25] } : e)), msg: 'Bill converted into 2 installments.' },
+              { k: 'pause', tag: 'Spend Conservation', title: 'Pause discretionary & CapEx', desc: 'Removes non-essential commitments until the cash trough clears.', btnLabel: 'Pause Spend', ok: exp.some((e) => !e.essential),
+                fn: () => setExp((a) => a.filter((e) => e.essential)), msg: 'Non-essential items paused.' },
+              { k: 'factor', tag: 'Factoring Facility', title: 'Factor the largest receivable (2.5% fee)', desc: 'Advances the cash to Day 2 at a 2.5% discount.', btnLabel: 'Advance Invoice', ok: !!biggest,
+                fn: () => setInv((a) => a.map((i) => i.id === biggest.id ? { ...i, due: 2, amount: Math.round(i.amount * 0.975), conf: 'high' } : i)), msg: 'Factoring advance credited to Day 2.' }
+            ].map((a) => (
+              <div key={a.k} className={`${card} p-5 flex flex-col justify-between`}>
+                <div><span className="text-xs font-bold px-2.5 py-1 rounded-md border bg-amber-400/10 text-amber-300 border-amber-400/30">{a.tag}</span>
+                  <h4 className="font-bold mt-3">{a.title}</h4><p className={`text-xs mt-1 ${sub}`}>{a.desc}</p></div>
+                <div className="mt-5 pt-4 border-t border-slate-800/40 flex justify-end">
+                  <button disabled={applied[a.k] || !a.ok} onClick={() => act(a.k, a.fn, a.msg)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold ${applied[a.k] ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700/60' : a.ok ? 'bg-amber-400 hover:bg-amber-300 text-slate-950' : 'bg-slate-700 text-slate-400 cursor-not-allowed'}`}>
+                    {applied[a.k] ? '✓ Applied' : a.btnLabel}</button></div>
+              </div>))}
+          </div>)}
+ 
+        {tab === 'ledger' && (
+          <div className={`${card} p-5 space-y-5`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><h3 className="font-bold">Cash Ledger</h3><p className={`text-xs ${sub}`}>Edit the opening balance, add or remove entries.</p></div>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <label className={`${ghost} font-mono`}>Opening: <input type="number" value={cash} onChange={(e) => setCash(num(e.target.value))} className="w-24 bg-transparent text-right text-amber-400 font-bold focus:outline-none" /></label>
+                <button className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold" onClick={() => setRow({ kind: 'invoice', title: '', amount: '', day: 15, cat: 'Vendor' })}>+ Receivable</button>
+                <button className={btn} onClick={() => setRow({ kind: 'expense', title: '', amount: '', day: 15, cat: 'Vendor' })}>+ Payable</button></div>
+            </div>
+            {row && (
+              <form onSubmit={saveRow} className={`p-4 rounded-xl border grid sm:grid-cols-5 gap-2 text-xs items-end ${dark ? 'border-amber-500/30 bg-slate-950/60' : 'border-amber-200 bg-amber-50'}`}>
+                <input required placeholder={row.kind === 'invoice' ? 'Client name' : 'Obligation title'} className={`${inp} sm:col-span-2`} value={row.title} onChange={(e) => setRow({ ...row, title: e.target.value })} />
+                <input required type="number" placeholder="Amount" className={inp} value={row.amount} onChange={(e) => setRow({ ...row, amount: e.target.value })} />
+                <input required type="number" min="1" max="90" placeholder="Day" className={inp} value={row.day} onChange={(e) => setRow({ ...row, day: e.target.value })} />
+                {row.kind === 'expense'
+                  ? <select className={inp} value={row.cat} onChange={(e) => setRow({ ...row, cat: e.target.value })}>{['Vendor', 'Payroll', 'Tax', 'Rent', 'CapEx', 'Discretionary'].map((c) => <option key={c}>{c}</option>)}</select>
+                  : <div />}
+                <div className="sm:col-span-5 flex justify-end gap-2"><button type="button" className={ghost} onClick={() => setRow(null)}>Cancel</button><button className={btn}>Save entry</button></div>
+              </form>)}
+            {[['Receivables (inflows)', 'text-emerald-400', inv.length, (
+              inv.map((i) => (<tr key={i.id} className={dark ? 'hover:bg-slate-800/40' : 'hover:bg-slate-50'}>
+                <td className="p-3 font-semibold">{i.client}</td><td className="p-3 font-mono font-bold text-emerald-400">{fmt(i.amount)}</td><td className="p-3">Day {i.due}</td>
+                <td className="p-3"><button className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${i.paid ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'border-slate-700 text-slate-400'}`}
+                  onClick={() => { snap('Toggle invoice'); setInv((a) => a.map((x) => x.id === i.id ? { ...x, paid: !x.paid } : x)); }}>{i.paid ? '✓ Received' : 'Pending'}</button></td>
+                <td className="p-3 text-right"><button className="text-rose-500" onClick={() => { snap('Delete invoice'); setInv((a) => a.filter((x) => x.id !== i.id)); }}>🗑</button></td></tr>))), ['Customer', 'Amount', 'Due', 'Status', '']],
+              ['Liabilities (outflows)', 'text-amber-400', exp.length, (
+              exp.map((e) => (<tr key={e.id} className={dark ? 'hover:bg-slate-800/40' : 'hover:bg-slate-50'}>
+                <td className="p-3 font-semibold">{e.title}</td><td className="p-3 font-mono font-bold text-amber-400">{fmt(e.amount)}</td><td className="p-3">Day {e.days.join(', ')}</td>
+                <td className="p-3">{e.cat} · {e.essential ? 'Essential' : 'Discretionary'}</td>
+                <td className="p-3 text-right"><button className="text-rose-500" onClick={() => { snap('Delete expense'); setExp((a) => a.filter((x) => x.id !== e.id)); }}>🗑</button></td></tr>))), ['Obligation', 'Amount', 'Due', 'Category', '']]
+            ].map(([title, color, n, rows, heads]) => (
+              <div key={title} className={`overflow-x-auto border rounded-xl ${dark ? 'border-slate-800' : 'border-slate-200'}`}>
+                <div className={`p-2.5 text-xs font-bold flex justify-between border-b ${color} ${dark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><span>{title}</span><span>{n} entries</span></div>
+                <table className="w-full text-left text-xs"><thead className={sub}><tr>{heads.map((h, i) => <th key={i} className="p-3">{h}</th>)}</tr></thead>
+                  <tbody className={`divide-y ${dark ? 'divide-slate-800/60' : 'divide-slate-100'}`}>{rows}</tbody></table>
+                {n === 0 && <p className={`p-4 text-xs ${sub}`}>No entries yet.</p>}
+              </div>))}
+          </div>)}
+      <div className={`${card} p-3 flex items-center justify-between text-xs`}>{(() => { const i = TABS.findIndex((t) => t[0] === tab); return (<>
+          <button disabled={i === 0} className={`${ghost} disabled:opacity-30`} onClick={() => setTab(TABS[i - 1][0])}>← Back</button><span className={sub}>Step {i + 1} of {TABS.length}: {TABS[i][1]}</span>
+          <button disabled={i === TABS.length - 1} className={`${btn} disabled:opacity-30`} onClick={() => setTab(TABS[i + 1][0])}>Next →</button></>); })()}</div>
+      </main>
+ 
+      {scanOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className={`border rounded-2xl w-full max-w-xl max-h-[92vh] overflow-y-auto nsb p-6 space-y-4 text-xs ${dark ? 'bg-slate-900 border-amber-500/40 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <div className="flex justify-between items-center pb-3 border-b border-slate-800"><div><h3 className="font-bold text-base">Smart Bill & Invoice Scanner</h3><p className="text-slate-400">Camera, JPG/PNG/PDF upload or Google Drive</p></div>
+              <button onClick={() => { stopCam(); setScanOpen(false); setBill(null); setShot(null); }} className="text-slate-400">✕</button></div>
+            <div className="flex gap-1">{[['camera', '📷 Live Camera'], ['upload', '⬆ Upload JPG/PNG/PDF'], ['drive', '🗂 Google Drive']].map(([k, l]) => <button key={k} className={`flex-1 ${scanTab === k ? btn : ghost}`} onClick={() => { if (k !== 'camera') stopCam(); setScanTab(k); }}>{l}</button>)}</div>
+            {scanTab === 'camera' && (<div className="space-y-2"><div className="rounded-xl overflow-hidden bg-black aspect-video flex items-center justify-center">
+              {shot ? <img src={shot} className="w-full h-full object-cover" alt="captured" /> : <video ref={videoRef} playsInline muted className={`w-full h-full object-cover ${cam ? '' : 'hidden'}`} />}
+              {!cam && !shot && <p className="text-slate-400">Camera is off. Press Start Camera.</p>}</div>
+              {camErr && <p className="text-rose-400">{camErr}</p>}
+              <div className="flex flex-wrap justify-end gap-2">
+                <label className={`${ghost} cursor-pointer`}>📱 Take photo (device camera)<input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => onBillFile(e.target.files[0])} /></label>
+                {cam ? <button className={btn} onClick={snapCam}>📸 Capture snapshot</button> : <button className={btn} onClick={startCam}>{shot ? 'Retake' : 'Start camera'}</button>}</div></div>)}
+            {scanTab === 'upload' && (<div className="space-y-2">
+              <label className={`block border-2 border-dashed rounded-xl p-8 text-center cursor-pointer ${dark ? 'border-slate-700 hover:border-amber-400' : 'border-slate-300 hover:border-amber-400'}`}>
+                <input type="file" className="hidden" accept=".jpg,.jpeg,.png,.pdf,image/*,application/pdf" onChange={(e) => onBillFile(e.target.files[0])} />
+                <div className="text-2xl">☁</div><b>Click to choose a bill</b><p className="text-slate-400">JPEG · PNG · PDF</p></label>
+              {shot && <img src={shot} className="max-h-48 mx-auto rounded-lg" alt="preview" />}
+              <div className="pt-2"><span className={sub}>Demo bills (download, then upload):</span><div className="flex flex-wrap gap-2 mt-1.5">{DEMO.map((n) => <button key={n} className={ghost} onClick={() => drawBill(n)}>⬇ {n}</button>)}</div></div></div>)}
+            {scanTab === 'drive' && (<div className="space-y-2"><div className={`divide-y border rounded-xl ${dark ? 'divide-slate-800 border-slate-800' : 'divide-slate-100 border-slate-200'}`}>
+              {DEMO.map((n) => <div key={n} onClick={() => { setBill(readName(n)); setShot(null); }} className="p-2.5 flex justify-between cursor-pointer hover:bg-amber-400/10"><span>🗂 {n}</span><span className="text-amber-400 font-mono">{fmt(+(n.match(/\d{3,7}/) || [0])[0])}</span></div>)}</div>
+              <div className="flex gap-2"><input id="drv" className={inp} placeholder="Paste a Google Drive file link" /><button className={btn} onClick={() => { const v = document.getElementById('drv').value; if (v) { setBill(readName('Drive_Invoice')); say('Link fetched', 'Confirm the details below'); } }}>Fetch</button></div>
+              <p className="text-slate-400">Demo list only. A live Drive connection needs Google OAuth in your own backend.</p></div>)}
+            {bill && (<div className={`p-3.5 rounded-xl border space-y-2 ${dark ? 'bg-slate-950 border-emerald-500/40' : 'bg-emerald-50 border-emerald-200'}`}>
+              <b className="text-emerald-400">✔ Extracted details (edit if needed)</b>
+              <div className="grid grid-cols-2 gap-2"><input className={inp} value={bill.title} onChange={(e) => setBill({ ...bill, title: e.target.value })} /><input className={inp} type="number" placeholder="Amount" value={bill.amount} onChange={(e) => setBill({ ...bill, amount: e.target.value })} />
+                <input className={inp} type="number" min="1" max="90" value={bill.day} onChange={(e) => setBill({ ...bill, day: e.target.value })} />
+                <select className={inp} value={bill.type} onChange={(e) => setBill({ ...bill, type: e.target.value })}><option value="payable">Payable (outflow)</option><option value="receivable">Receivable (inflow)</option></select></div>
+              <button className={`${btn} w-full py-2.5`} onClick={commitBill}>Add to live forecast & ledger</button></div>)}
+            <p className="text-slate-400">Demo files carry the amount and day in the file name. Photos need you to confirm the amount; automatic reading needs an OCR/AI API on your server.</p>
+          </div></div>)}
+ 
+      {csvOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className={`border rounded-2xl w-full max-w-lg p-6 space-y-4 text-xs ${dark ? 'bg-slate-900 border-emerald-500/40 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <div className="flex justify-between pb-3 border-b border-slate-800"><h3 className="font-bold text-base">Import CSV statement or ledger</h3><button onClick={() => { setCsvOpen(false); setCsvPrev(null); }} className="text-slate-400">✕</button></div>
+            {!csvPrev ? (<label className={`block border-2 border-dashed rounded-xl p-8 text-center cursor-pointer ${dark ? 'border-slate-700 hover:border-amber-400' : 'border-slate-300 hover:border-amber-400'}`}>
+              <input type="file" accept=".csv,.txt" className="hidden" onChange={(e) => onCsv(e.target.files[0])} /><div className="text-2xl">☁</div><b>Click to choose a CSV</b><p className="text-slate-400">Columns: type, title, amount, day, category</p></label>) : (
+              <div className="space-y-3"><div className={`p-3 rounded-xl border ${dark ? 'bg-slate-950 border-slate-800' : 'bg-slate-50 border-slate-200'}`}><b className="text-emerald-400">CSV verified</b><p>{csvPrev.i.length} receivables · {csvPrev.e.length} payables{csvPrev.cash !== null && ` · opening cash ${fmt(csvPrev.cash)}`}</p></div>
+                <div className="flex gap-2">{[['merge', 'Merge with current'], ['replace', 'Replace (clean start)']].map(([k, l]) => <button key={k} className={`flex-1 ${csvMode === k ? btn : ghost}`} onClick={() => setCsvMode(k)}>{l}</button>)}</div>
+                <div className="flex justify-end gap-2"><button className={ghost} onClick={() => setCsvPrev(null)}>Back</button><button className={btn} onClick={applyCsv}>Apply to forecast</button></div></div>)}
+            <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-800"><button className={ghost} onClick={() => dl('cashflow_template.csv', new Blob([CSV_T], { type: 'text/csv' }))}>⬇ Download template</button>
+              <button className={ghost} onClick={() => dl('demo_bank_statement.csv', new Blob([CSV_T], { type: 'text/csv' }))}>⬇ Download demo file</button></div>
+          </div></div>)}
+ 
+      {authOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className={`border rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto nsb p-6 shadow-2xl space-y-4 ${dark ? 'bg-slate-900 border-amber-500/40 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div><h3 className="font-bold text-base">{authMode === 'signup' ? 'Create Business Account' : 'Company Login'}</h3>
+                <p className="text-[11px] text-slate-400">Sign in to manage company runway</p></div>
+              <button onClick={() => setAuthOpen(false)} className="text-slate-400 hover:text-white">✕</button></div>
+            <div className={`flex rounded-lg border p-0.5 text-xs font-semibold ${dark ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-slate-100'}`}>
+              {[['login', 'Log In'], ['signup', 'Create Account']].map(([m, l]) => (
+                <button key={m} type="button" onClick={() => { setAuthMode(m); setAuthErr(''); }} className={`flex-1 py-1.5 rounded-md ${authMode === m ? 'bg-amber-400 text-slate-950' : 'text-slate-400'}`}>{l}</button>))}</div>
+            {authErr && <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-medium">{authErr}</div>}
+            <form onSubmit={submitAuth} className="space-y-3 text-xs">
+              {authMode === 'signup' && field('Company / Business Name', 'companyName', { required: true, placeholder: 'e.g. Apex Innovations Pvt Ltd' })}
+              {field('Business Email', 'email', { type: 'email', required: true, placeholder: 'founder@company.com' })}
+              {authMode === 'signup' && field('Registered Business ID (optional)', 'businessId', { placeholder: 'GSTIN / CIN' })}
+              <div className={authMode === 'signup' ? 'grid grid-cols-2 gap-3' : ''}>
+                {field('Password', 'password', { type: 'password', required: true, placeholder: '••••••••' })}
+                {authMode === 'signup' && field('Confirm Password', 'confirmPassword', { type: 'password', required: true, placeholder: '••••••••' })}</div>
+              {authMode === 'signup' && (
+                <div className="space-y-3 pt-3 border-t border-slate-800">
+                  <h4 className="font-bold text-sm">Business Profile</h4>
+                  {select('What type of business do you operate?', 'businessType', ['Retail / E-commerce', 'Manufacturing', 'Food & Restaurant', 'IT / Software', 'Wholesale / Distribution', 'Other'])}
+                  {select('Average monthly revenue?', 'monthlyRevenue', ['Below ₹1 lakh', '₹1–5 lakh', '₹5–10 lakh', '₹10–25 lakh', 'Above ₹25 lakh'])}
+                  <div className="grid grid-cols-2 gap-3">
+                    {field('Current Bank Balance', 'currentCash', { type: 'number', required: true, placeholder: `${sym} Amount` })}
+                    {field('Avg Monthly Expense', 'monthlyExpenditure', { type: 'number', required: true, placeholder: `${sym} Amount` })}</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    {field('Pending Receivables', 'customerReceivables', { type: 'number', placeholder: `From customers (${sym})` })}
+                    {field('Pending Payables', 'vendorPayables', { type: 'number', placeholder: `To vendors (${sym})` })}</div>
+                  {select('Biggest financial challenge?', 'financialChallenge', ['Delayed customer payments', 'Cash shortages', 'Managing vendor payments', 'Unexpected expenses', 'Salary and tax management', 'Financial planning'])}
+                </div>)}
+              <div className="pt-3 border-t border-slate-800 space-y-2">
+                <button type="submit" className="w-full py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-xl">{authMode === 'signup' ? 'Create Account & Initialize Runway' : 'Sign In'}</button>
+                {authMode === 'login' && <button type="button" className={`w-full py-2 font-semibold rounded-xl border ${dark ? 'bg-slate-950 text-amber-400 border-slate-800' : 'bg-slate-100 border-slate-200'}`}
+                  onClick={() => { setAuth({ ...auth, email: 'founder@apex.com', password: 'password123' }); }}>⚡ Fill demo credentials (Apex Innovations)</button>}
+              </div>
+            </form>
+          </div>
+        </div>)}
+    </div>
+  );
+}
+ 
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
+ 
+
+
